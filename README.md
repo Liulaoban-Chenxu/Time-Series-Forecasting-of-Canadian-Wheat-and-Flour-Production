@@ -28,7 +28,7 @@ Average prediction squared error (APSE) is used to compare out-of-sample perform
 
 ## Data Source
 
-The data come from [Statistics Canada Table 32-10-0016-01, *Milled wheat and wheat flour produced (x 1,000)*]([https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=3210001601](https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=3210001601&cubeTimeFrame.startMonth=09&cubeTimeFrame.startYear=2004&cubeTimeFrame.endMonth=09&cubeTimeFrame.endYear=2024&referencePeriods=20040901%2C20240901)). The official table is monthly and covers the geography of Canada.
+The data come from [Statistics Canada Table 32-10-0016-01, *Milled wheat and wheat flour produced (x 1,000)*](https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=3210001601&cubeTimeFrame.startMonth=09&cubeTimeFrame.startYear=2004&cubeTimeFrame.endMonth=09&cubeTimeFrame.endYear=2024&referencePeriods=20040901%2C20240901). The official table is monthly and covers the geography of Canada.
 
 The analysis uses `Data_Group 5.csv` and filters the dataset to retain observations classified as:
 
