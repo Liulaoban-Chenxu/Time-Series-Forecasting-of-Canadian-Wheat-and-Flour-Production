@@ -8,9 +8,8 @@ The analysis covers data from September 2004 through August 2024 and evaluates e
 
 | Item | Details |
 |---|---|
-| Group | Group 5 |
 | Registered project title | *Analysis of Wheat Flour Produced in Canada From Sept. 2004 to Sept. 2021* |
-| Current report coverage | September 2004 - August 2024 |
+| Report coverage | September 2004 - August 2024 |
 
 ## Project Overview
 
