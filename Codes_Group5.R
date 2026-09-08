@@ -1,0 +1,452 @@
+## Part 1: Import Data
+# Read the data
+production <- read.csv("Data_Group 5.csv", header = TRUE)
+wheatflour <- subset(production, Milled.wheat.and.wheat.flour.produced == "Total wheat flour produced")
+wheatflour = data.frame(wheatflour, row.names = NULL)
+
+# Plot the time series data
+wheatflourTS <- ts(wheatflour$VALUE, start = 2004 + 8/12, end = 2024 + 7/12, frequency = 12)
+Time = time(wheatflourTS)
+Season = as.factor(cycle(wheatflourTS))
+par(mfrow = c(1, 2))
+plot(wheatflourTS, ylab = "Total wheat flour produced (in thousand)", 
+     main = "Total Wheat Flour Produced")
+acf(wheatflourTS, main = "Total Wheat Flour Produced")
+
+# Check if we need transformation on data
+year = 20
+group = rep(1: year, each = 12)
+fligner.test(wheatflourTS, group)
+
+# Then we decompose the data to see if the time series is stationary
+plot(decompose(wheatflourTS))
+
+## Part 2: Make training and validation sets
+# Form training and validation sets
+wheatflourTS.train <- window(wheatflourTS, start = 2004 + 8/12, end = 2023 + 7/12)
+train.indx = 1:which(wheatflour$REF_DATE == "2023-08")
+wheatflourTS.test <- window(wheatflourTS, start = 2023 + 8/12)
+
+## Part 3: Regression Model (Un-regularized)
+# First we check the un-regularized regression model
+# Initialize all variables we need
+APSE.regression = APSE.regression.both = c()
+degree = 10
+X = poly(Time, degree) # Polynomial matrix X
+season <- as.factor(cycle(wheatflourTS.train))
+season.test <- as.factor(cycle(wheatflourTS.test))
+# For each polynomial degree p:
+# (1) Fit a regression model based on training set 
+# (2) Predict the test set data based on the model
+# (3) Calculate the APSE of predicting the test set
+for (p in 1:degree) {
+  # regression model with only trend
+  fit.regression = lm(wheatflourTS.train ~ X[train.indx, 1:p])
+  Fitted.test.regression = cbind(1, X[-train.indx, 1:p]) %*% coef(fit.regression)
+  APSE.regression[p] = mean((as.vector(wheatflourTS.test) - Fitted.test.regression)^2)
+  
+  # regression model with trend + seasonality
+  fit.regression.both = lm(wheatflourTS.train ~ X[train.indx, 1:p] + season)
+  modelmatrix = model.matrix(wheatflourTS.test ~ X[-train.indx, 1:p] + season.test)
+  Fitted.test.regression.both = coef(fit.regression.both) %*% t(modelmatrix)
+  APSE.regression.both[p] = mean((as.vector(wheatflourTS.test) - Fitted.test.regression.both)^2)
+}
+data.frame("Degree" = 1:degree,
+           "APSE_trend" = APSE.regression,
+           "APSE_trend_and_seasonality)" = APSE.regression.both)
+
+# We choose the trend + seasonality regression model with p = 4
+# We fit the optimal model to the training data
+p.optimal = which.min(APSE.regression)
+fit.optimal = lm(wheatflourTS.train ~ X[train.indx, 1:p.optimal] + season)
+
+# Perform model diagnostics to check the fit performance
+par(mfrow = c(2, 2))
+residuals = fit.optimal$residuals
+fitted = fit.optimal$fitted.values
+plot(fitted, residuals, pch = 16, col = adjustcolor("black", 0.5), xlab = "Fitted", ylab = "Residual", main = "Fitted vs. Residual")
+abline(h = 0, lty = 2, lwd = 2, col = "red")
+car::qqPlot(residuals, pch = 16, col = adjustcolor("black", 0.7), xlab = "Theoretical Quantiles (Normal)", ylab = "Sample Quantiles (r.hat)", 
+            main = "Normal Q-Q Plot")
+plot(residuals, pch = 16, col = adjustcolor("black", 0.5), ylab = "Residual", main = "Residual vs. Index")
+abline(h = 0, lty = 2, lwd = 2, col = "red")
+acf(residuals)
+
+# Plot the observed data, fitted data, predicted data and 95% prediction interval
+time = as.vector(Time)
+model.regression = lm(wheatflourTS ~ poly(Time, p.optimal) + Season) # final model
+predict.time = seq(2024 + 8/12, 2025 + 7/12, length = 12)
+predict = list(Time = predict.time, Season = as.factor(c(9:12, 1:8)))
+Fitted.predict.regression = predict(model.regression, newdata = predict, interval = "prediction") 
+plot(wheatflourTS, xlim = c(2004, 2026), ylim = c(160, 240), col = adjustcolor("black", 0.5),
+     ylab = "Total wheat flour produced (in thousand)",
+     main = "Un-regularized Regression Model with Trend and Seasonality (p = 4)") # observed data
+lines(time, model.regression$fitted.values, col = "red") # fitted data
+lines(Fitted.predict.regression[, 1] ~ predict$Time, col = "blue") # predicted data
+lines(Fitted.predict.regression[, 2] ~ predict$Time, lty = 2, col = "purple") # 95% prediction interval
+lines(Fitted.predict.regression[, 3] ~ predict$Time, lty = 2, col = "purple") # 95% prediction interval
+legend("top", legend = c("Observed Data", "Fitted Data", "Predicted Data", "Prediction Interval"),
+       col = c(adjustcolor("black", 0.5), "red", "blue", "purple"), lty = c(1, 1, 1, 2), bty = "n")
+
+## Part 4: Regression Model (Regularized)
+# Then we check the regularized regression model
+# Consider alpha = {0, 0.5, 1}
+# Initialize all variables we need
+library(glmnet)
+APSE.ridge = APSE.elastic = APSE.lasso= c()
+APSE.ridge.both = APSE.elastic.both = c()
+lambda.ridge = lambda.elastic = lambda.lasso = c()
+lambda.ridge.both = lambda.elastic.both = c()
+poly.degree = 2:degree
+
+# For each polynomial degree p:
+# (1) Find the regression model with optimal lambda (lambda.1se) using cross validation method 
+# (2) Use the optimal lambda to fit the regression model based on training set 
+# (3) Predict the test set data based on the model 
+# (4) calculate the APSE of predicting the test set
+# For Lasso regression, we fit the trend first and see if we needed to add seasonality model later
+for (p in 1:length(poly.degree)) {
+  Seasonmatrix = model.matrix(wheatflourTS ~ Season)[, 2:12] # seasonality matrix with only 0 and 1 for each season
+  set.seed(443) # set seed to ensure reproducible random variables
+  
+  # ridge regression model with only trend
+  CV.ridge = cv.glmnet(X[train.indx, 1:poly.degree[p]], as.vector(wheatflourTS.train), alpha = 0, nfolds = 10)
+  lambda.ridge[p] = CV.ridge$lambda.1se
+  fit.train.ridge = glmnet(X[train.indx, 1:poly.degree[p]], as.vector(wheatflourTS.train), alpha = 0, 
+                           lambda = lambda.ridge[p], 
+                           standardize = TRUE, intercept = TRUE, 
+                           family = "gaussian")
+  Fitted.test.ridge = predict(fit.train.ridge, newx = X[-train.indx, 1:poly.degree[p]], 
+                              type = "response")
+  APSE.ridge[p] = mean((wheatflourTS.test - Fitted.test.ridge)^2)
+  
+  # ridge regression model with trend + seasonality
+  CV.ridge.both = cv.glmnet(cbind(X[train.indx, 1:poly.degree[p]], Seasonmatrix[train.indx,]), 
+                            as.vector(wheatflourTS.train), alpha = 0, nfolds = 10)
+  lambda.ridge.both[p] = CV.ridge.both$lambda.1se
+  fit.train.ridge.both = glmnet(cbind(X[train.indx, 1:poly.degree[p]], Seasonmatrix[train.indx,]),
+                                as.vector(wheatflourTS.train), alpha = 0, 
+                                lambda = lambda.ridge.both[p], 
+                                standardize = TRUE, intercept = TRUE, 
+                                family = "gaussian")
+  Fitted.test.ridge.both = predict(fit.train.ridge.both, newx = cbind(X[-train.indx, 1:poly.degree[p]],
+                                                                      Seasonmatrix[-train.indx,]), 
+                                   type = "response")
+  APSE.ridge.both[p] = mean((wheatflourTS.test - Fitted.test.ridge.both)^2)
+  
+  # elastic net regression model with only trend
+  CV.elastic = cv.glmnet(X[train.indx, 1:poly.degree[p]], as.vector(wheatflourTS.train), alpha = 0.5, nfolds = 10)
+  lambda.elastic[p] = CV.elastic$lambda.1se
+  fit.train.elastic = glmnet(X[train.indx, 1:poly.degree[p]], as.vector(wheatflourTS.train), alpha = 0.5, 
+                             lambda = lambda.elastic[p], 
+                             standardize = TRUE, intercept = TRUE, 
+                             family = "gaussian")
+  Fitted.test.elastic = predict(fit.train.elastic, newx = X[-train.indx, 1:poly.degree[p]], 
+                                type = "response")
+  APSE.elastic[p] = mean((wheatflourTS.test - Fitted.test.elastic)^2)
+  
+  # elastic net regression model with trend + seasonality
+  CV.elastic.both = cv.glmnet(cbind(X[train.indx, 1:poly.degree[p]], Seasonmatrix[train.indx,]), 
+                              as.vector(wheatflourTS.train), alpha = 0.5, nfolds = 10)
+  lambda.elastic.both[p] = CV.elastic.both$lambda.1se
+  fit.train.elastic.both = glmnet(cbind(X[train.indx, 1:poly.degree[p]], Seasonmatrix[train.indx,]),
+                                  as.vector(wheatflourTS.train), alpha = 0.5, 
+                                  lambda = lambda.elastic.both[p], 
+                                  standardize = TRUE, intercept = TRUE, 
+                                  family = "gaussian")
+  Fitted.test.elastic.both = predict(fit.train.elastic.both, newx = cbind(X[-train.indx, 1:poly.degree[p]],
+                                                                          Seasonmatrix[-train.indx,]), 
+                                     type = "response")
+  APSE.elastic.both[p] = mean((wheatflourTS.test - Fitted.test.elastic.both)^2)
+  
+  # For Lasso regression, we only consider trend case
+  # lasso regression model with only trend
+  CV.lasso = cv.glmnet(X[train.indx, 1:poly.degree[p]], as.vector(wheatflourTS.train), alpha = 1, nfolds = 10)
+  lambda.lasso[p] = CV.lasso$lambda.1se
+  fit.train.lasso = glmnet(X[train.indx, 1:poly.degree[p]], as.vector(wheatflourTS.train), alpha = 1, 
+                           lambda = lambda.lasso[p], 
+                           standardize = TRUE, intercept = TRUE, 
+                           family = "gaussian")
+  Fitted.test.lasso = predict(fit.train.lasso, newx = X[-train.indx, 1:poly.degree[p]], 
+                              type = "response")
+  APSE.lasso[p] = mean((wheatflourTS.test - Fitted.test.lasso)^2)
+}
+
+data.frame("Degree" = poly.degree,
+           "APSE_Ridge_trend" = APSE.ridge,
+           "APSE_Ridge_trend_and_seasonality" = APSE.ridge.both,
+           "APSE_Elastic_trend" = APSE.elastic,
+           "APSE_Elastic_trend_and_seasonality" = APSE.elastic.both,
+           "APSE_Lasso" = APSE.lasso)
+
+# Since we have multiple cases, we summarize all optimal cases for each model
+# ridge regression
+ridge.optimal.index = which.min(APSE.ridge)
+ridge.both.optimal.index = which.min(APSE.ridge.both)
+lambda.ridge.optimal = lambda.ridge[ridge.optimal.index]
+lambda.ridge.both.optimal = lambda.ridge.both[ridge.both.optimal.index]
+p.ridge.optimal = poly.degree[ridge.optimal.index]
+p.ridge.both.optimal = poly.degree[ridge.both.optimal.index]
+
+# elastic net regression
+elastic.optimal.index = which.min(APSE.elastic)
+elastic.both.optimal.index = which.min(APSE.elastic.both)
+lambda.elastic.optimal = lambda.elastic[elastic.optimal.index]
+lambda.elastic.both.optimal = lambda.elastic.both[elastic.both.optimal.index]
+p.elastic.optimal = poly.degree[elastic.optimal.index]
+p.elastic.both.optimal = poly.degree[elastic.both.optimal.index]
+
+# lasso regression
+lasso.optimal.index = which.min(APSE.lasso)
+lambda.lasso.optimal = lambda.lasso[lasso.optimal.index]
+p.lasso.optimal = poly.degree[lasso.optimal.index]
+
+data.frame("Model" = c("Ridge_trend", "Ridge_trend_and_seasonality", "Elastic_trend", "Elastic_trend_and_seasonality",
+                       "Lasso_trend"), 
+           "Optimal_degree" = c(p.ridge.optimal, p.ridge.both.optimal, p.elastic.optimal, p.elastic.both.optimal,
+                                p.lasso.optimal),
+           "APSE" = c(APSE.ridge[ridge.optimal.index], APSE.ridge.both[ridge.both.optimal.index],
+                      APSE.elastic[elastic.optimal.index], APSE.elastic.both[elastic.both.optimal.index],
+                      APSE.lasso[lasso.optimal.index]))
+
+# We add seasonality to optimal lasso regression with trend model to see if seasonality improves the model
+fit.train.lasso.both = glmnet(cbind(X[train.indx, 1:p.lasso.optimal], Seasonmatrix[train.indx,]),
+                              as.vector(wheatflourTS.train), alpha = 1, 
+                              lambda = lambda.lasso.optimal, 
+                              standardize = TRUE, intercept = TRUE, 
+                              family = "gaussian")
+Fitted.test.lasso.both = predict(fit.train.lasso.both, newx = cbind(X[-train.indx, 1:p.lasso.optimal],
+                                                                    Seasonmatrix[-train.indx,]), 
+                                 type = "response")
+APSE.lasso.both = mean((wheatflourTS.test - Fitted.test.lasso.both)^2)
+APSE.lasso.both # APSE is smaller for lasso, so adding seasonality indeed get a better model for prediction but still larger than the elastic net model
+fit.train.lasso.both$beta # the seasonal components are not all included (do not fit the model with seasonal component)
+
+# We choose the trend + seasonality Elastic Net regression model with p = 3
+# We fit the optimal model to the training data
+p.optimal = p.elastic.both.optimal
+lambda.optimal = lambda.elastic.both.optimal
+fit.optimal = glmnet(cbind(X[train.indx, 1:p.optimal], Seasonmatrix[train.indx,]), as.vector(wheatflourTS.train), alpha = 0.5, 
+                     lambda = lambda.optimal, 
+                     standardize = TRUE, intercept = TRUE, 
+                     family = "gaussian")
+
+# Perform model diagnostics to check the fit performance
+par(mfrow = c(2, 2))
+fitted = predict(fit.optimal, newx = cbind(X[train.indx, 1:p.optimal], Seasonmatrix[train.indx,]), type = "response")
+residuals = wheatflourTS.train - fitted
+plot(fitted, residuals, pch = 16, col = adjustcolor("black", 0.5), xlab = "Fitted", ylab = "Residual", main = "Fitted vs. Residual")
+abline(h = 0, lty = 2, lwd = 2, col = "red")
+car::qqPlot(residuals, pch = 16, col = adjustcolor("black", 0.7), xlab = "Theoretical Quantiles (Normal)", ylab = "Sample Quantiles (r.hat)", 
+            main = "Normal Q-Q Plot")
+plot(residuals, type = "p", col = adjustcolor("black", 0.5), ylab = "Residual", main = "Residuals vs. Time")
+abline(h = 0, lty = 2, lwd = 2, col = "red")
+acf(residuals)
+
+# Plot the observed data, fitted data, and predicted data
+model.regularization = glmnet(cbind(X[, 1:p.optimal], Seasonmatrix), as.vector(wheatflourTS), alpha = 0.5, 
+                              lambda = lambda.optimal, 
+                              standardize = TRUE, intercept = TRUE, 
+                              family = "gaussian") # final model
+Fitted.regularization = predict(model.regularization, newx = cbind(X[, 1:p.optimal], Seasonmatrix), 
+                                type = "response")
+predict.time = seq(2024 + 8/12, 2025 + 7/12, length = 12)
+Seasonmatrix.predict = model.matrix(~ as.factor(c(9:12, 1:8)))[, 2:12]
+X.predict = cbind(poly(predict.time, p.optimal), Seasonmatrix.predict)
+Fitted.predict.regularization = predict(model.regularization, newx = X.predict, 
+                                        type = "response")
+plot(wheatflourTS, xlim = c(2004, 2026), ylim = c(150, 270), col = adjustcolor("black", 0.5), 
+     ylab = "Total wheat flour produced (in thousand)", 
+     main = "Elastic Net Model with Trend and Seansonality (p = 3)") # observed data
+lines(time, Fitted.regularization, col = "red") # fitted data
+lines(predict.time, Fitted.predict.regularization, col = "blue") # predicted data
+legend("top", legend = c("Observed Data", "Fitted Data", "Predicted Data"),
+       col = c(adjustcolor("black", 0.5), "red", "blue"), lty = 1, bty = "n")
+
+## Part 5: Holt-Winter Model
+# Next we check the Holt-Winter model
+# Fit all 4 cases of Holt-Winter model
+# simple exponential smoothing
+es <- HoltWinters(wheatflourTS.train, gamma=FALSE , beta=FALSE)
+es.predict = predict(es, n.ahead=12)
+
+# double exponential smoothing 
+hw <- HoltWinters(wheatflourTS.train, gamma=FALSE)
+hw.predict = predict(hw, n.ahead=12)
+
+# additive Holt-Winters
+hw.additive <- HoltWinters(wheatflourTS.train, seasonal="additive")
+hw.additive.predict = predict(hw.additive, n.ahead=12)
+
+# multiplicative Holt-Winters
+hw.multiplicative <- HoltWinters(wheatflourTS.train, seasonal="multiplicative")
+hw.multiplicative.predict = predict(hw.multiplicative, n.ahead=12)
+
+# Calculate the APSE value for each model
+APSE.es = mean((wheatflourTS.test-es.predict)^2)
+APSE.hw = mean((wheatflourTS.test-hw.predict)^2)
+APSE.hw.additive = mean((wheatflourTS.test-hw.additive.predict)^2)
+APSE.hw.multiplicative = mean((wheatflourTS.test-hw.multiplicative.predict)^2)
+APSE = c(APSE.es, APSE.hw, APSE.hw.additive, APSE.hw.multiplicative)
+data.frame(Model = c("Simple Exponential Smoothing", 
+                     "Double Exponential Smoothing", 
+                     "Additive Holt-Winters", 
+                     "Multiplicative Holt-Winters"),
+           APSE=APSE)
+
+# We choose the Multiplicative Holt-Winters model
+# We fit the optimal model to the training data
+final.fit.hw <- HoltWinters(wheatflourTS, seasonal="multiplicative")
+fit.hw.multiplicative = predict(final.fit.hw, n.ahead=12, prediction.interval=TRUE)
+
+# Plot the observed data, fitted data, predicted data, and 95% prediction interval
+plot(final.fit.hw, xlim=c(2004, 2026), ylim=c(150, 270), 
+     col=adjustcolor("black", 0.5), ylab="Total wheat flour produced (in thousand)", 
+     main="Multiplicative Holt-Winters Model") # observed data + fitted data
+lines(fit.hw.multiplicative[, 1], col="blue") # predicted data
+lines(fit.hw.multiplicative[, 2] ~ predict$Time, lty=2, col="purple") # 95% prediction interval
+lines(fit.hw.multiplicative[, 3] ~ predict$Time, lty=2, col="purple") # 95% prediction interval
+legend("top", legend=c("Observed Data", "Fitted Data", "Predicted Data", "Prediction Interval"), 
+       col=c(adjustcolor("black", 0.5), "red", "blue", "purple"),
+       lty=c(1, 1, 1, 2), bty="n")
+
+# We can plot the residual plots to check the stationarity after Holt-Winter model
+par(mfrow=c(1, 2))
+plot(residuals(final.fit.hw), type = "p", ylab="Residual", 
+     main="Residual Plot of Final Model", , col = adjustcolor("black", 0.5))
+abline(h = 0, lty = 2, lwd = 2, col = "red")
+acf(residuals(final.fit.hw), lag.max=36, main="Residual of Final Model")
+
+## Part 6: Box-Jenkins Model
+# Lastly, we check the Box-Jenkins Model
+plot(wheatflourTS.train, ylab="Total wheat flour produced (in thousand)", 
+     main="Total Wheat Flour Produced (Training Set)") # non-stationary, has trend and seasonality
+diff_1 <- diff(wheatflourTS.train, differences=1)
+plot(diff_1, ylab="Total wheat flour produced (in thousand)", 
+     main="One Time Differenced Data (Training Set)")
+acf(diff_1, lag.max=36, main="One Time Regular Differencing") # non-stationary, has correlation on seasonal lag
+diff_s <- diff(wheatflourTS.train, lag=12)
+plot(diff_s, ylab="Total wheat flour produced (in thousand)", 
+     main="Seasonal Differenced Data (Training Set)")
+acf(diff_s, lag.max=36, main="One Time Seasonal Differencing") # non-stationary since lag 12 and lag 24 pop out
+diff_final <- diff(diff_s, differences=1)
+plot(diff_final, ylab="Total wheat flour produced (in thousand)", 
+     main="One Time Differenced + Seasonal Differenced Data (Training Set)")
+acf(diff_final, lag.max=36, main="One Time Regular and Seasonal Diff") # lag 12 still pops out, but OK
+# In SARIMA, d = D = 1, s = 12
+pacf(diff_final, lag.max=36, main="One Time Regular and Seasonal Diff")
+
+# We propose the following models
+library(astsa)
+fit1 <- sarima(wheatflourTS.train, p=0,d=1,q=1,P=0,D=1,Q=1,S=12)
+
+fit2 <- sarima(wheatflourTS.train, p=0,d=1,q=1,P=1,D=1,Q=0,S=12)
+
+fit3 <- sarima(wheatflourTS.train, p=1,d=1,q=0,P=0,D=1,Q=1,S=12)
+
+fit4 <- sarima(wheatflourTS.train, p=1,d=1,q=0,P=1,D=1,Q=0,S=12)
+
+fit5 <- sarima(wheatflourTS.train, p=1,d=1,q=1,P=1,D=1,Q=0,S=12)
+
+fit6 <- sarima(wheatflourTS.train, p=1,d=1,q=1,P=0,D=1,Q=1,S=12)
+
+fit7 <- sarima(wheatflourTS.train, p=1,d=1,q=0,P=1,D=1,Q=1,S=12)
+
+fit8 <- sarima(wheatflourTS.train, p=0,d=1,q=1,P=1,D=1,Q=1,S=12)
+
+fit9 <- sarima(wheatflourTS.train, p=2,d=1,q=1,P=0,D=1,Q=1,S=12)
+
+# Note that all models do not perform well on the pvalues
+# We will still choose the best among these according to the APSE
+fore1 <- sarima.for(wheatflourTS.train, n.ahead=12, 
+                    p=0,d=1,q=1,P=0,D=1,Q=1,S=12)
+title("SARIMA(0,1,1)x(0,1,1)_12")
+lines(wheatflourTS.test,col='blue',type='b',pch=16)
+
+fore2 <- sarima.for(wheatflourTS.train, n.ahead=12, 
+                    p=0,d=1,q=1,P=1,D=1,Q=0,S=12)
+title("SARIMA(0,1,1)x(1,1,0)_12")
+lines(wheatflourTS.test,col='blue',type='b',pch=16)
+
+fore3 <- sarima.for(wheatflourTS.train, n.ahead=12, 
+                    p=1,d=1,q=0,P=0,D=1,Q=1,S=12)
+title("SARIMA(1,1,0)x(0,1,1)_12")
+lines(wheatflourTS.test,col='blue',type='b',pch=16)
+
+fore4 <- sarima.for(wheatflourTS.train, n.ahead=12, 
+                    p=1,d=1,q=0,P=1,D=1,Q=0,S=12)
+title("SARIMA(1,1,0)x(1,1,0)_12")
+lines(wheatflourTS.test,col='blue',type='b',pch=16)
+
+fore5 <- sarima.for(wheatflourTS.train, n.ahead=12, 
+                    p=1,d=1,q=1,P=1,D=1,Q=0,S=12)
+title("SARIMA(1,1,1)x(1,1,0)_12")
+lines(wheatflourTS.test,col='blue',type='b',pch=16)
+
+fore6 <- sarima.for(wheatflourTS.train, n.ahead=12, 
+                    p=1,d=1,q=1,P=0,D=1,Q=1,S=12)
+title("SARIMA(1,1,1)x(0,1,1)_12")
+lines(wheatflourTS.test,col='blue',type='b',pch=16)
+
+fore7 <- sarima.for(wheatflourTS.train, n.ahead=12, 
+                    p=1,d=1,q=0,P=1,D=1,Q=1,S=12)
+title("SARIMA(1,1,0)x(1,1,1)_12")
+lines(wheatflourTS.test,col='blue',type='b',pch=16)
+
+fore8 <- sarima.for(wheatflourTS.train, n.ahead=12, 
+                    p=0,d=1,q=1,P=1,D=1,Q=1,S=12)
+title("SARIMA(0,1,1)x(1,1,1)_12")
+lines(wheatflourTS.test,col='blue',type='b',pch=16)
+
+fore9 <- sarima.for(wheatflourTS.train, n.ahead=12, 
+                    p=2,d=1,q=1,P=0,D=1,Q=1,S=12)
+title("SARIMA(2,1,1)x(0,1,1)_12")
+lines(wheatflourTS.test,col='blue',type='b',pch=16)
+
+# Calculate APSE
+APSE1 <- mean((wheatflourTS.test-fore1$pred)^2)
+APSE2 <- mean((wheatflourTS.test-fore2$pred)^2)
+APSE3 <- mean((wheatflourTS.test-fore3$pred)^2)
+APSE4 <- mean((wheatflourTS.test-fore4$pred)^2)
+APSE5 <- mean((wheatflourTS.test-fore5$pred)^2)
+APSE6 <- mean((wheatflourTS.test-fore6$pred)^2)
+APSE7 <- mean((wheatflourTS.test-fore7$pred)^2)
+APSE8 <- mean((wheatflourTS.test-fore8$pred)^2)
+APSE9 <- mean((wheatflourTS.test-fore9$pred)^2)
+
+APSE <- c(APSE1, APSE2, APSE3, APSE4, APSE5, APSE6, APSE7, APSE8, APSE9)
+data.frame(Model=1:9, APSE=APSE)
+
+# We see fit1 has the lowest APSE, we will choose it for prediction
+final.fit <- sarima(wheatflourTS, p=0,d=1,q=1,P=0,D=1,Q=1,S=12)
+future.forecast <- sarima.for(wheatflourTS, n.ahead=12, p=0,d=1,q=1,P=0,D=1,Q=1,S=12)
+fit <- future.forecast$pred # predicted data
+lower <- fit-1.96*future.forecast$se # 95% prediction interval
+upper <- fit+1.96*future.forecast$se # 95% prediction interval
+ts.plot(wheatflourTS, xlim=c(2004, 2026), ylim=c(160, 240), col=adjustcolor("black", 0.5),
+        ylab="Total wheat flour produced",main="SARIMA(0,1,1)x(0,1,1)_12 Model")
+
+x = c(time(upper) , rev(time(upper)))
+y = c(upper, rev(lower))
+polygon(x, y, col="grey" , border=NA) # shade prediction interval
+
+lines(fit,col='red',type='l',pch=16 , cex=0.5) 
+lines(lower,col='black',lty=2)
+lines(upper,col='black',lty=2)
+legend("top", legend = c("Observed Data", "Predicted Data", "Prediction Interval"),
+       col=c(adjustcolor("black", 0.5), "red", "black"), 
+       lty=c(1, 1, 2), bty="n")
+
+## Overall, we choose the un-regularized regression model as our final model to fit the data
+# Plot our final chosen model with a clearer version
+time = Time[-train.indx]
+plot(Time[-as.vector(train.indx)], wheatflourTS[-as.vector(train.indx)], xlim = c(2023.6, 2025.6), ylim = c(160, 240), 
+     col = c(adjustcolor("black", 0.5)), type = "l", 
+     xlab = "Time", ylab = "Total wheat flour produced (in thousand)",
+     main = "Final Model and Its Prediction") # observed data (test set)
+lines(time, model.regression$fitted.values[-train.indx], col = "red") # fitted data (test set)
+lines(Fitted.predict.regression[, 1] ~ predict$Time, col = "blue") # predicted data
+lines(Fitted.predict.regression[, 2] ~ predict$Time, lty = 2, col = "purple") # 95% prediction interval
+lines(Fitted.predict.regression[, 3] ~ predict$Time, lty = 2, col = "purple") # 95% prediction interval
+legend("bottom", legend = c("Observed Data (Test set)", "Fitted Data (Test set)", "Predicted Data", "Prediction Interval"),
+       col = c(adjustcolor("black", 0.5), "red", "blue", "purple"), lty = c(1, 1, 1, 2), bty = "n")
